@@ -1,0 +1,39 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cppbuild",
+			"label": "C/C++: 编译五子棋 (g++ 全项目)",
+			"command": "F:/mingw64/bin/g++.exe",
+			"args": [
+				"-fdiagnostics-color=always",
+				"-g",
+				"-O2",
+				"-fexec-charset=GBK",
+				"gomoku.cpp",
+				"ai.cpp",
+				"settings.cpp",
+				"audio.cpp",
+				"network.cpp",
+				"replay.cpp",
+				"-o",
+				"gomoku.exe",
+				"-leasyx",
+				"-lgdi32",
+				"-lwinmm",
+				"-lws2_32"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"problemMatcher": [
+				"$gcc"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"detail": "编译全部源码。-fexec-charset=GBK 将 UTF-8 源码中的中文字符串转为 GBK，EasyX(ANSI) 才能正确显示中文。"
+		}
+	]
+}
