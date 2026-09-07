@@ -25,8 +25,9 @@ extern int OFFSET_Y;
 extern int board[MAX_BOARD][MAX_BOARD];
 extern int current_player;  // 1=黑棋, 2=白棋
 extern int move_count;
-extern int game_mode;       // 0=人人对弈, 1=人机对弈, 2=网络对弈
+extern int game_mode;       // 0=人人对弈, 1=人机对弈, 2=网络对弈, 3=AI测试
 #define GAME_MODE_NETWORK 2
+#define GAME_MODE_AI_TEST 3
 extern int game_running;    // 0=未开始, 1=进行中
 extern int game_started;    // 0=未开始过游戏（选单阶段）, 1=已开始过游戏
 extern int settings_open;   // 0=关闭设置, 1=打开设置

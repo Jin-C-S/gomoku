@@ -49,7 +49,7 @@ DWORD move_start_tick;          // 当前这一步开始的时间戳
 int board[MAX_BOARD][MAX_BOARD];
 int current_player = 1;     // 1=黑棋, 2=白棋
 int move_count = 0;         // 步数
-int game_mode = 0;          // 0=人人对弈, 1=人机对弈, 2=网络对弈
+int game_mode = 0;          // 0=人人对弈, 1=人机对弈, 2=网络对弈, 3=AI测试
 int game_running = 0;       // 0=未开始, 1=进行中
 int game_started = 0;       // 0=选单阶段, 1=已开始过游戏
 IMAGE bg_img;               // 背景图片（全局只加载一次）
@@ -541,6 +541,7 @@ void draw_ui_panel()
     const char* mode_str = "模式：人人对弈";
     if (game_mode == 1) mode_str = "模式：人机对弈";
     if (game_mode == 2) mode_str = "模式：网络对弈";
+    if (game_mode == 3) mode_str = "模式：AI对弈";
     outtextxy(BTN_X, 195, mode_str);
 
     // 游戏状态 / 网络连接状态
@@ -565,12 +566,13 @@ void draw_ui_panel()
     }
 
     // ---- 绘制按钮 ----
-    int btn_y[] = {240, 295, 350, 400, 450, 500, 550, 600};
+    int btn_y[] = {240, 295, 350, 400, 450, 500, 550, 600, 650};
     const char* btn_text[] = { game_running ? "游戏中..." : "开始游戏",
                                "重新开始", "选择模式", "设置",
-                               "回放存档", "悔棋", "求和", "退出游戏" };
+                               "回放存档", "悔棋", "求和", "退出游戏",
+                               "AI测试" };
 
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 9; i++)
     {
         if (i == 7)  // 退出按钮用不同颜色
         {
@@ -589,6 +591,11 @@ void draw_ui_panel()
                 setfillcolor(RGB(100, 180, 100));  // 可点击 - 绿色
                 setlinecolor(RGB(70, 150, 70));
             }
+        }
+        else if (i == 8)  // AI测试按钮用蓝色区分
+        {
+            setfillcolor(RGB(120, 160, 220));
+            setlinecolor(RGB(80, 110, 170));
         }
         else
         {
@@ -612,7 +619,7 @@ void draw_ui_panel()
 // 处理按钮点击 - 返回 1=已处理, 0=未点击按钮
 int handle_button_click(int x, int y)
 {
-    int btn_y[] = {240, 295, 350, 400, 450, 500, 550, 600};
+    int btn_y[] = {240, 295, 350, 400, 450, 500, 550, 600, 650};
 
     // 开始游戏
     if (x >= BTN_X && x <= BTN_X + BTN_W && y >= btn_y[0] && y <= btn_y[0] + BTN_H)
@@ -748,7 +755,7 @@ int handle_button_click(int x, int y)
             net_send_move(NET_SIGNAL_UNDO_REQ, NET_SIGNAL_UNDO_REQ);
             net_waiting_response = 1;
         }
-        else if (game_mode == 1)  // 人机：撤销 AI 和玩家的各一步
+        else if (game_mode == 1 || game_mode == GAME_MODE_AI_TEST)  // 人机/AI测试：撤销双方各一步
         {
             undo_last_moves(2);
             draw_full();
@@ -781,6 +788,10 @@ int handle_button_click(int x, int y)
         {
             MessageBoxW(GetHWnd(), L"人机模式下无法和棋", L"求和", MB_OK);
         }
+        else if (game_mode == GAME_MODE_AI_TEST)  // AI测试：无需求和
+        {
+            MessageBoxW(GetHWnd(), L"AI对弈中，无需求和", L"求和", MB_OK);
+        }
         else  // 人人
         {
             int choice = MessageBoxW(GetHWnd(), L"是否同意和棋？", L"求和", MB_OKCANCEL);
@@ -802,6 +813,26 @@ int handle_button_click(int x, int y)
     {
         closegraph();
         exit(0);
+        return 1;
+    }
+
+    // AI 测试：简单 AI(黑) vs 困难 AI(白) 自动对弈
+    if (x >= BTN_X && x <= BTN_X + BTN_W && y >= btn_y[8] && y <= btn_y[8] + BTN_H)
+    {
+        net_waiting_response = 0;
+        // 若正在网络对局，先断开连接
+        if (game_mode == GAME_MODE_NETWORK && network_connected)
+            net_disconnect();
+
+        game_mode = GAME_MODE_AI_TEST;
+        game_started = 1;
+        game_running = 1;
+        init_board();
+        init_timer();
+        init_hint();
+        if (game_settings.bgm_enabled) audio_play_bgm();  // 恢复背景音乐
+        draw_full();
+        draw_ui_panel();
         return 1;
     }
 
@@ -1098,6 +1129,10 @@ int main()
                 if (handle_button_click(msg.x, msg.y))
                     continue;
 
+                // AI 测试模式：忽略棋盘点击（两个 AI 自动对弈）
+                if (game_mode == GAME_MODE_AI_TEST)
+                    continue;
+
                 // 检测提示按钮点击（仅人机模式）
                 if (game_mode == 1 && game_running)
                 {
@@ -1383,6 +1418,70 @@ int main()
                 game_running = 0;
                 net_disconnect();
                 draw_full();
+            }
+        }
+
+        // ---- AI 测试模式：简单AI(黑) vs 困难AI(白) 自动对弈 ----
+        if (game_mode == GAME_MODE_AI_TEST && game_running)
+        {
+            Sleep(350);  // 每步间隔，便于观看
+
+            int ai_row, ai_col;
+            if (current_player == 1)
+                ai_decide(&ai_row, &ai_col);        // 简单 AI 执黑
+            else
+                ai_decide_alpha(&ai_row, &ai_col);  // 困难 AI 执白
+
+            if (ai_row >= 0 && is_valid_move(ai_row, ai_col))
+            {
+                board[ai_row][ai_col] = current_player;
+                audio_play_place();  // 落子音效
+                move_count++;
+                move_history_row[move_count - 1] = ai_row;
+                move_history_col[move_count - 1] = ai_col;
+                draw_full();
+
+                move_start_tick = GetTickCount();  // 切换落子重置时间
+
+                if (check_win(ai_row, ai_col, current_player))
+                {
+                    draw_full();
+                    wchar_t text[64];
+                    swprintf(text, 64, L"游戏结束！%ls获胜！共%d步",
+                             current_player == 1 ? L"黑棋（简单AI）" : L"白棋（困难AI）",
+                             move_count);
+                    MessageBoxW(GetHWnd(), text, L"AI测试", MB_OK);
+
+                    audio_stop_bgm();
+                    audio_play_win();  // 胜利音效
+
+                    int save_res = MessageBoxW(GetHWnd(), L"是否保存棋谱？", L"保存棋谱", MB_YESNO);
+                    if (save_res == IDYES) save_game(current_player == 1 ? 1 : 2);
+
+                    game_running = 0;
+                    init_board();
+                    init_timer();
+                    init_hint();
+                    draw_ui_panel();
+                }
+                else
+                {
+                    current_player = (current_player == 1) ? 2 : 1;
+                    draw_full();
+                }
+            }
+            else
+            {
+                // 无合法落子：平局
+                game_running = 0;
+                draw_full();
+                MessageBoxW(GetHWnd(), L"棋盘已满，本局平局", L"AI测试", MB_OK);
+                int save_res = MessageBoxW(GetHWnd(), L"是否保存棋谱？", L"保存棋谱", MB_YESNO);
+                if (save_res == IDYES) save_game(3);
+                init_board();
+                init_timer();
+                init_hint();
+                draw_ui_panel();
             }
         }
 
