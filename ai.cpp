@@ -183,6 +183,31 @@ static int pos_has_live_three(int row, int col, int color)
     return 0;
 }
 
+// 落子是否构成"强制获胜"组合（以攻代守的判断依据）：
+// 任意方向成"活四"，或同时构成 双四 / 四三（这些是对方挡不完的必杀威胁）。
+// 黑棋的 四四/三三 是禁手（开启禁手规则时），不作为强制获胜组合。
+static int pos_force_win(int row, int col, int color)
+{
+    static const int dirs[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+    int n_four = 0, n_live3 = 0, live4 = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        ShapeCode s = classify_dir(row, col, dirs[i][0], dirs[i][1], color);
+        if (s == SHAPE_FORBIDDEN) continue;   // 禁手（黑棋长连）不算获胜
+        if (dir_is_four(s)) { n_four++; if (s == SHAPE_LIVE4) live4 = 1; }
+        if (dir_is_live_three(s)) n_live3++;
+    }
+    if (color == 1 && game_settings.forbidden_enabled)
+    {
+        if (n_four >= 2)  return 0;   // 四四禁手
+        if (n_live3 >= 2) return 0;   // 三三禁手
+    }
+    if (live4)                        return 1;  // 活四：对方挡不完
+    if (n_four >= 2)                  return 1;  // 双四：必胜
+    if (n_four >= 1 && n_live3 >= 1)   return 1;  // 四三：必胜
+    return 0;
+}
+
 // AI 决策：遍历所有空位，综合攻击分与防守分，取最高分位置
 // AI 执白（player=2），玩家执黑（player=1）
 void ai_decide(int* best_row, int* best_col)
@@ -234,7 +259,9 @@ void ai_decide(int* best_row, int* best_col)
 //   3. 深度控制   —— 迭代加深逐层深入，始终搜索到最大深度（超时中止已注释）
 // ============================================================
 
-#define AB_MAX_DEPTH    4        // 最大搜索深度
+#ifndef AB_MAX_DEPTH
+#define AB_MAX_DEPTH    4        // 最大搜索深度（可在编译期 -D 覆盖，便于调参/对局模拟提速）
+#endif
 #define AB_TIME_BUDGET  250      // 每步思考时间预算（毫秒）
 #define AB_INF          100000000
 
@@ -284,9 +311,9 @@ static int gen_moves(int moves[][2])
     return n;
 }
 
-// 把候选点按"在该处落子对当前方的价值"降序排序，提升 alpha-beta 剪枝效率
-// 价值取 max(进攻分, 防守分)：既能优先走出自己的杀招，也不会漏掉堵住对方杀招的点
-// 先一次性算好各点价值再排序，避免在插入排序中重复计算
+// 把候选点按"在该处落子的综合价值"降序排序，提升 alpha-beta 剪枝效率
+// 价值取 进攻分+防守分：既能优先走出自己的杀招，也兼顾堵对方杀招的点，
+// 让"一子两用"（既攻又守）的点排到最前，配合迭代加深尽早锁定强手。
 static void order_moves(int moves[][2], int n, int color)
 {
     int opp = (color == 1) ? 2 : 1;
@@ -295,7 +322,7 @@ static void order_moves(int moves[][2], int n, int color)
     {
         int av = eval_position(moves[i][0], moves[i][1], color);
         int dv = eval_position(moves[i][0], moves[i][1], opp);
-        val[i] = av > dv ? av : dv;
+        val[i] = av + dv;
     }
     // 插入排序（n 通常 <60）
     for (int i = 1; i < n; i++)
@@ -441,7 +468,21 @@ void ai_decide_alpha(int* best_row, int* best_col)
         if (win) { *best_row = r; *best_col = c; return; }
     }
 
-    // 快速路径 2：若黑棋没有立即成五，再考虑"四威胁"（堵住黑棋可借助的四扩展点）
+    // 快速路径 2：以攻代守——黑棋尚无"立即成五"点时，若白棋某手能形成
+    // 强制获胜组合（活四/双四/四三），优先自己取胜，而不是单纯堵防。
+    for (int i = 0; i < n; i++)
+    {
+        int r = moves[i][0], c = moves[i][1];
+        if (pos_force_win(r, c, 2))
+        {
+            *best_row = r;
+            *best_col = c;
+            return;
+        }
+    }
+
+    // 快速路径 3：白棋没有强制杀时才防守——若黑棋存在"可形成四"的威胁点，
+    // 直接堵住其四扩展点（保持原防守优先语义；首个命中即返回）。
     for (int i = 0; i < n; i++)
     {
         int r = moves[i][0], c = moves[i][1];
@@ -451,8 +492,8 @@ void ai_decide_alpha(int* best_row, int* best_col)
         if (has_four) { *best_row = r; *best_col = c; return; }
     }
 
-    // 活三威胁交由排序/搜索权衡处理（order_moves 已按攻防最大值排序，
-    // 组合质变后的评分会让活三/四威胁自然排到前面）
+    // 其余（活三应对、布子等）交由排序与搜索权衡处理：order_moves 现按攻防
+    // 合计排序，组合质变评分会让威胁点排到前面，搜索深度内自行权衡攻守。
 
     order_moves(moves, n, 2);
 
