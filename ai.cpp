@@ -255,20 +255,26 @@ void ai_decide(int* best_row, int* best_col)
 //
 // 为兼顾效率与强弱做了控制：
 //   1. 候选点裁剪 —— 只考虑已有棋子 2 格范围内的空位（开局约 20~50 个）
-//   2. 走法排序   —— 按"攻防最大值"降序排列，大幅提升剪枝效率
-//   3. 深度控制   —— 迭代加深逐层深入，始终搜索到最大深度（超时中止已注释）
+//   2. 走法排序   —— 按"进攻+防守合计价值"降序排列，大幅提升剪枝效率
+//   3. 深度与限时 —— 迭代加深逐层深入；每层开搜前检查时间预算，超时即采用
+//      "最近一次完整完成层"的着法（最终着法永远来自完整搜索，不会被半截层污染）
 // ============================================================
 
 #ifndef AB_MAX_DEPTH
 #define AB_MAX_DEPTH    4        // 最大搜索深度（可在编译期 -D 覆盖，便于调参/对局模拟提速）
 #endif
-#define AB_TIME_BUDGET  250      // 每步思考时间预算（毫秒）
+// 每步思考时间预算（毫秒）：迭代加深的"层间限时"依据——深度 1 必完整搜索，其后每层
+// 开搜前检查剩余时间，超时即采用最近一次"完整完成层"的着法。可在编译期覆盖，例如
+//   g++ ... -DAB_TIME_BUDGET=1000
+// 数值越大思考越深越强、每步等待越久。
+#define AB_TIME_BUDGET  500
 #define AB_INF          100000000
 
-// 超时中止控制已注释：改为始终搜索到最大深度，避免超时中止把被打断层的结果当作最终着法
-// static DWORD   ab_deadline;      // 搜索截止时间戳
-// static int     ab_abort;         // 超时中止标记
-// static long    ab_nodes;         // 已评估节点数（定期检查时间用）
+// 超时中止控制：搜索截止时间戳 / 中止标记 / 已算节点计数（限时检查用）。
+// 中止标记只作废"当前层"，最终着法回退到上一层完整结果，见 ai_decide_alpha。
+static DWORD   ab_deadline;      // 搜索截止时间戳
+static int     ab_abort;         // 超时中止标记（本层超时置位）
+static long    ab_nodes;         // 已评估节点数（定期检查时间用）
 
 // 棋盘上是否已有棋子
 static int board_has_stone()
@@ -380,12 +386,13 @@ static int evaluate_board(int color)
 // 返回当前行动方视角的最佳分值
 static int negamax(int depth, int alpha, int beta, int color)
 {
-    // 定期检查超时（每 256 个节点一次，避免严重超时）——已注释，改用固定深度搜索
-    // if ((++ab_nodes & 255) == 0 && GetTickCount() > ab_deadline)
-    // {
-    //     ab_abort = 1;
-    //     return 0;
-    // }
+    // 定期检查超时（每 256 个节点一次，控制 GetTickCount 调用频率）：
+    // 超时立即置中止标记并返回，由上层调用方中止本层搜索（该层结果作废）。
+    if ((++ab_nodes & 255) == 0 && GetTickCount() > ab_deadline)
+    {
+        ab_abort = 1;
+        return 0;
+    }
 
     if (depth == 0)
         return evaluate_board(color);
@@ -414,7 +421,7 @@ static int negamax(int depth, int alpha, int beta, int color)
         if (best > alpha) alpha = best;
         if (alpha >= beta) break;   // β 剪枝：后续分支已不可能影响决策
 
-        // if (ab_abort) break;   // 超时中止已注释
+        if (ab_abort) break;        // 本层已超时：放弃剩余分支（本层结果作废）
     }
     return best;
 }
@@ -497,23 +504,29 @@ void ai_decide_alpha(int* best_row, int* best_col)
 
     order_moves(moves, n, 2);
 
-    // 迭代加深：从深度 1 开始逐层完整搜索
-    // （超时中止已注释，改为始终搜索到最大深度）
-    int best_r = moves[0][0], best_c = moves[0][1];
-    // ab_deadline = GetTickCount() + AB_TIME_BUDGET;
-    // ab_abort = 0;
-    // ab_nodes = 0;
-
-    // 动态调整搜索深度：候选点少时可搜索更深
+    // 迭代加深 + 层间限时：
+    //   逐层从 depth=1 加深到 max_depth。深度 1 必然完整搜索（作为保底着法），其后每层
+    //   开搜前检查剩余时间：超时即停止加深，采用"最近一次完整完成层"的着法；层内
+    //   negamax 检测到超时也会中止当前层（ab_abort），该层结果作废、同样回退上一层。
+    //   最终着法永远来自一个"被完整搜完"的深度，不会被半截结果污染。
+    // PV 传递：每层完成后把该层最佳着法移到 moves[0]，作为下一层最先搜索的着法，
+    //   显著提升下一层的剪枝效率（迭代加深的核心收益）。
     int max_depth = AB_MAX_DEPTH;
     if (n < 10) max_depth = 6;
     else if (n < 20) max_depth = 5;
 
+    ab_deadline = GetTickCount() + AB_TIME_BUDGET;
+    ab_abort = 0;
+    ab_nodes = 0;
+
     for (int depth = 1; depth <= max_depth; depth++)
     {
-        // if (GetTickCount() > ab_deadline) break;   // 时间到，用上一层结果（已注释）
+        // 层间限时检查：depth=1 保底必做，之后每层开搜前看是否已超时
+        if (depth > 1 && GetTickCount() >= ab_deadline) break;
 
+        ab_abort = 0;   // 本层独立的超时标记
         int alpha = -AB_INF, beta = AB_INF;
+        int best_r = moves[0][0], best_c = moves[0][1];   // 默认着法 = 上一层 PV
         int found = 0;
 
         for (int i = 0; i < n; i++)
@@ -537,19 +550,36 @@ void ai_decide_alpha(int* best_row, int* best_col)
                 found = 1;
             }
 
-            // 虽然根节点 beta = +INF，但为规范起见仍检查剪枝
+            // 根层 beta=+INF 正常不会剪枝，保留规范性检查
             if (alpha >= beta) break;
 
-            // if (ab_abort) break;   // 本层搜索被超时打断（已注释）
+            if (ab_abort) break;   // 层内超时：本层结果不完整，作废本层
         }
 
-        if (found)
+        if (ab_abort) continue;   // 本层未完整搜完，保留上一层完成结果
+
+        // 把本层最佳着法换到 moves[0]，作为下一层的 PV 与最终着法（已在首位则无需交换）
+        if (found && !(best_r == moves[0][0] && best_c == moves[0][1]))
         {
-            *best_row = best_r;
-            *best_col = best_c;
+            for (int i = 0; i < n; i++)
+            {
+                if (moves[i][0] == best_r && moves[i][1] == best_c)
+                {
+                    int tr = moves[0][0], tc = moves[0][1];
+                    moves[0][0] = best_r;
+                    moves[0][1] = best_c;
+                    moves[i][0] = tr;
+                    moves[i][1] = tc;
+                    break;
+                }
+            }
         }
-        // if (ab_abort) break;   // 超时中止已注释
     }
+
+    // 最终着法 = moves[0]：若有层被完整搜完，它是最近一次完成层的最佳着法；
+    // 若极端情况下连深度 1 都被超时打断，它退回静态排序最优的候选点，保证不会返回 (-1,-1)。
+    *best_row = moves[0][0];
+    *best_col = moves[0][1];
 }
 
 // 根据设置中的 AI 难度选择决策函数
